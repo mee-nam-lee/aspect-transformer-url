@@ -1,5 +1,0 @@
-{
-  "name": "Aspect Ratio Transformer",
-  "description": "Change the aspect ratio of your images using Gemini 3.1 Flash Image Preview.",
-  "requestFramePermissions": []
-}
