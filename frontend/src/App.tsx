@@ -4,9 +4,9 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI } from "@google/genai";
 import { motion, AnimatePresence } from "motion/react";
 import { Upload, Image as ImageIcon, RefreshCw, Check, AlertCircle, Key, Maximize2 } from "lucide-react";
+import ImagePickerPopup from './components/ImagePickerPopup';
 
 // Supported aspect ratios for UI
 const ALL_ASPECT_RATIOS = [
@@ -50,18 +50,54 @@ export default function App() {
   const [selectedRatio, setSelectedRatio] = useState<AspectRatio>("1:1");
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasApiKey, setHasApiKey] = useState(false);
+  const [hasApiKey, setHasApiKey] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState("");
+  const [retryMessage, setRetryMessage] = useState<string | null>(null);
   const [popupImage, setPopupImage] = useState<string | null>(null);
   const [showEditPanel, setShowEditPanel] = useState(false);
   const [editPrompt, setEditPrompt] = useState("");
   const [isEditing, setIsEditing] = useState(false);
-  const [selection, setSelection] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
-  const [isSelecting, setIsSelecting] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
   const cancelRef = useRef(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isPickerOpen, setIsPickerOpen] = useState(false);
+
+  const fetchAndConvertToDataUrl = async (url: string): Promise<string> => {
+    const response = await fetch(url);
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const handleSelectFromGallery = async (imageUrl: string) => {
+    try {
+      const dataUrl = await fetchAndConvertToDataUrl(imageUrl);
+      setSourceImage(dataUrl);
+      const dims = await getImageDimensions(dataUrl);
+      setSourceDims(dims);
+      setGeneratedImage(null);
+      setGenDims(null);
+      setError(null);
+    } catch (e: any) {
+      setError(`Failed to load image from gallery: ${e.message}`);
+    }
+  };
+
+  const handleClearImage = () => {
+    setSourceImage(null);
+    setSourceDims(null);
+    setGeneratedImage(null);
+    setGenDims(null);
+    setError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
 
   const loadingMessages = [
     "Analyzing your image structure...",
@@ -71,16 +107,7 @@ export default function App() {
     "Almost there! Polishing the final result...",
   ];
 
-  useEffect(() => {
-    checkApiKey();
-  }, []);
-
-  const checkApiKey = async () => {
-    if (window.aistudio) {
-      const selected = await window.aistudio.hasSelectedApiKey();
-      setHasApiKey(selected);
-    }
-  };
+  // API key check removed as it's handled by backend
 
   const getImageDimensions = (url: string): Promise<{ w: number; h: number }> => {
     return new Promise((resolve) => {
@@ -156,11 +183,6 @@ export default function App() {
     }, 3000);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
-      const base64Data = sourceImage.split(',')[1];
-      const mimeType = sourceImage.split(';')[0].split(':')[1];
-
       const apiRatio = API_RATIO_MAP[selectedRatio] || "1:1";
 
       const [w, h] = selectedRatio.split(':').map(Number);
@@ -174,65 +196,60 @@ export default function App() {
         layoutInstruction = "Layout Strategy (Vertical): Position the main object in the lower third of the frame to create a stable and professional composition. The upper portion should be a natural, high-quality extension of the background (negative space) that complements the subject without feeling excessively empty. Place logos and brand marks near the bottom edge, ensuring they don't clutter the main object. Maintain a balanced distribution of space that feels intentional and aesthetically pleasing.";
       }
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: mimeType,
-              },
+      let response;
+      const maxRetries = 3;
+      const delay = 2000;
+      
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          response = await fetch('/api/generate-image', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
             },
-            {
-              text: `Perform a professional outpainting to expand the image to the ${selectedRatio} aspect ratio. 
-OBJECT PRESERVATION RULE: Every object, subject, device, and element present in the original image MUST be preserved and remain fully visible in the final composition. Do NOT omit, delete, or skip any secondary monitors, circular callouts, smaller devices, or UI elements. If the original has multiple screens, all must be present.
-TEXT & LABEL PRESERVATION: All text, product names, labels, fine print, and legal disclaimers from the original image MUST be preserved exactly as they are. This includes model names (e.g., "UltraGear 27G610A"), brand names ("LG UltraGear"), and footer text. Do NOT remove or simplify any text.
-NO NEW TEXT: Do NOT add any new text, labels, watermarks, characters, or symbols that were not present in the original image. The extended areas should consist strictly of background elements and seamless extensions of the environment.
-NEGATIVE SPACE & MINIMALISM: Maintain the clean, minimalist aesthetic of the original image. Do NOT overfill the frame with unnecessary background details. Preserve the "white space" or "negative space" to ensure the composition remains balanced and uncluttered. The extended areas should feel spacious and airy, not crowded.
-Subject Integrity: Strictly preserve the original subjects, brand colors, typography, and logos. Do NOT alter, distort, or modify any of the existing elements. Do NOT duplicate or clone the subjects into the extended areas; the outpainting should ONLY extend the background environment.
-Background Continuity: Seamlessly extend the background to fit the new dimensions. The extended areas must be a flawless continuation of the original scene's lighting, texture, and depth. Ensure the background elements remain consistent and are NOT replaced or removed.
-Composition & Layout: ${layoutInstruction} Intelligently reposition existing elements (including all text and labels) to fit the new aspect ratio harmoniously, ensuring everything is fully visible and NOT cut off. The final result should look like a professionally shot photograph with intentional framing and balanced white space.`,
-            },
-          ],
-        },
-        config: {
-          imageConfig: {
-            aspectRatio: apiRatio as any,
-            imageSize: "1K"
-          },
-        },
-      });
+            body: JSON.stringify({
+              image: sourceImage,
+              aspectRatio: selectedRatio,
+              apiRatio: apiRatio,
+              layoutInstruction: layoutInstruction,
+            }),
+          });
 
-      if (cancelRef.current) return;
+          if (response.ok) break;
 
-      let foundImage = false;
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          const genUrl = `data:image/png;base64,${part.inlineData.data}`;
-          setGeneratedImage(genUrl);
-          const dims = await getImageDimensions(genUrl);
-          setGenDims(dims);
-          foundImage = true;
-          break;
+          const errorData = await response.json();
+          const errorMsg = errorData.detail || "";
+
+          if (response.status === 429 || errorMsg.includes("429") || errorMsg.includes("RESOURCE_EXHAUSTED")) {
+            if (attempt < maxRetries - 1) {
+              const waitTime = delay * Math.pow(2, attempt);
+              setRetryMessage(`오류 발생(429). ${waitTime/1000}초 후 재시도 중... (${attempt + 1}/${maxRetries})`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              continue;
+            }
+          }
+          throw new Error(errorMsg || `HTTP error! status: ${response.status}`);
+        } catch (error: any) {
+          if (attempt === maxRetries - 1) throw error;
         }
       }
 
-      if (!foundImage) {
-        throw new Error("No image was generated in the response.");
-      }
+      const data = await response.json();
+      
+      if (cancelRef.current) return;
+
+      setGeneratedImage(data.result);
+      const dims = await getImageDimensions(data.result);
+      setGenDims(dims);
+      
     } catch (err: any) {
       if (cancelRef.current) return;
       console.error(err);
-      if (err.message?.includes("Requested entity was not found")) {
-        setHasApiKey(false);
-        setError("API Key issue. Please re-select your API key.");
-      } else {
-        setError(err.message || "An error occurred during generation.");
-      }
+      setError(err.message || "An error occurred during generation.");
     } finally {
       clearInterval(messageInterval);
       setIsGenerating(false);
+      setRetryMessage(null);
     }
   };
 
@@ -244,95 +261,62 @@ Composition & Layout: ${layoutInstruction} Intelligently reposition existing ele
     setError(null);
     
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
-      const base64Data = generatedImage.split(',')[1];
-      const mimeType = generatedImage.split(';')[0].split(':')[1];
-
-      let selectionInfo = "";
-      if (selection) {
-        // Convert to normalized coordinates (0-1000)
-        const ymin = Math.min(selection.y1, selection.y2).toFixed(0);
-        const xmin = Math.min(selection.x1, selection.x2).toFixed(0);
-        const ymax = Math.max(selection.y1, selection.y2).toFixed(0);
-        const xmax = Math.max(selection.x1, selection.x2).toFixed(0);
-        selectionInfo = `The target area is defined by normalized coordinates [ymin: ${ymin}, xmin: ${xmin}, ymax: ${ymax}, xmax: ${xmax}]. `;
-      }
-
       const promptText = mode === 'delete' 
-        ? `${selectionInfo}Please remove the object or content within the specified area and seamlessly fill the background to match the surroundings.`
-        : `${selectionInfo}Modify the content within the specified area based on this request: "${editPrompt}". Seamlessly blend the changes with the rest of the image.`;
+        ? `Please remove the object or content described as "${editPrompt}" and seamlessly fill the background to match the surroundings.`
+        : `Modify the image based on this request: "${editPrompt}". Seamlessly blend the changes with the rest of the image.`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: mimeType,
-              },
+      let response;
+      const maxRetries = 3;
+      const delay = 2000;
+      
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          response = await fetch('/api/edit-image', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
             },
-            {
-              text: `${promptText} 
-Strictly maintain the overall composition, aspect ratio, and brand identity. 
-Preserve all existing text, logos, and product details outside the target area. 
-The result must be professional, high-quality, and indistinguishable from a real photograph.`,
-            },
-          ],
-        },
-        config: {
-          imageConfig: {
-            imageSize: "1K"
-          },
-        },
-      });
+            body: JSON.stringify({
+              image: generatedImage,
+              prompt: promptText,
+            }),
+          });
 
-      let foundImage = false;
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          const genUrl = `data:image/png;base64,${part.inlineData.data}`;
-          setGeneratedImage(genUrl);
-          const dims = await getImageDimensions(genUrl);
-          setGenDims(dims);
-          foundImage = true;
-          break;
+          if (response.ok) break;
+
+          const errorData = await response.json();
+          const errorMsg = errorData.detail || "";
+
+          if (response.status === 429 || errorMsg.includes("429") || errorMsg.includes("RESOURCE_EXHAUSTED")) {
+            if (attempt < maxRetries - 1) {
+              const waitTime = delay * Math.pow(2, attempt);
+              setRetryMessage(`오류 발생(429). ${waitTime/1000}초 후 재시도 중... (${attempt + 1}/${maxRetries})`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              continue;
+            }
+          }
+          throw new Error(errorMsg || `HTTP error! status: ${response.status}`);
+        } catch (error: any) {
+          if (attempt === maxRetries - 1) throw error;
         }
       }
 
-      if (!foundImage) {
-        throw new Error("No image was generated in the response.");
-      }
+      const data = await response.json();
+      
+      setGeneratedImage(data.result);
+      const dims = await getImageDimensions(data.result);
+      setGenDims(dims);
       setEditPrompt("");
-      setSelection(null);
     } catch (err: any) {
       console.error(err);
       setError(err.message || "An error occurred during editing.");
     } finally {
       setIsEditing(false);
+      setRetryMessage(null);
     }
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!showEditPanel || !imageRef.current) return;
-    const rect = imageRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 1000;
-    const y = ((e.clientY - rect.top) / rect.height) * 1000;
-    setSelection({ x1: x, y1: y, x2: x, y2: y });
-    setIsSelecting(true);
-  };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isSelecting || !imageRef.current) return;
-    const rect = imageRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(1000, ((e.clientX - rect.left) / rect.width) * 1000));
-    const y = Math.max(0, Math.min(1000, ((e.clientY - rect.top) / rect.height) * 1000));
-    setSelection(prev => prev ? { ...prev, x2: x, y2: y } : null);
-  };
-
-  const handleMouseUp = () => {
-    setIsSelecting(false);
-  };
 
   if (!hasApiKey) {
     return (
@@ -373,13 +357,7 @@ The result must be professional, high-quality, and indistinguishable from a real
           </div>
           <h1 className="text-xl font-bold tracking-tight">Aspect Transformer</h1>
         </div>
-        <button 
-          onClick={handleOpenKeyDialog}
-          className="text-xs font-medium uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2"
-        >
-          <Key className="w-3 h-3" />
-          Change Key
-        </button>
+
       </header>
 
       <main className="max-w-7xl mx-auto p-8 grid grid-cols-1 lg:grid-cols-12 gap-12">
@@ -396,7 +374,7 @@ The result must be professional, high-quality, and indistinguishable from a real
             {sourceImage && (
               <div className="flex gap-2 mb-3">
                 <button 
-                  onClick={triggerUpload}
+                  onClick={handleClearImage}
                   className="flex-1 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2"
                 >
                   <RefreshCw className="w-3 h-3" />
@@ -415,10 +393,9 @@ The result must be professional, high-quality, and indistinguishable from a real
             <div 
               onDragOver={(e) => e.preventDefault()}
               onDrop={handleDrop}
-              onClick={!sourceImage ? triggerUpload : undefined}
               className={`
-                relative group rounded-3xl p-4 transition-all duration-300 overflow-hidden
-                ${sourceImage ? 'border border-white/10 bg-white/5' : 'border-2 border-dashed border-white/10 hover:border-white/30 hover:bg-white/5 cursor-pointer'}
+                relative group rounded-3xl p-2 transition-all duration-300 overflow-hidden
+                ${sourceImage ? 'border border-white/10 bg-white/5' : 'border-2 border-dashed border-white/10'}
               `}
             >
               <input 
@@ -430,19 +407,35 @@ The result must be professional, high-quality, and indistinguishable from a real
               />
               
               {sourceImage ? (
-                <div className="relative aspect-video rounded-xl overflow-hidden">
-                  <img src={sourceImage} alt="Source" className="w-full h-full object-cover opacity-50" referrerPolicy="no-referrer" />
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <Check className="w-8 h-8 text-white/20" />
+                <div className="flex justify-center items-center py-2">
+                  <div className="relative w-64 h-64 rounded-lg overflow-hidden border border-white/20">
+                    <img src={sourceImage} alt="Source" className="w-full h-full object-contain bg-black" referrerPolicy="no-referrer" />
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                      <Check className="w-10 h-10 text-white" />
+                    </div>
                   </div>
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                    <Upload className="text-white/40 w-8 h-8" />
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <div className="w-12 h-12 bg-white/5 rounded-xl flex items-center justify-center mb-4">
+                    <Upload className="text-white/40 w-6 h-6" />
                   </div>
-                  <p className="text-white/60 font-medium">Drop image or click to upload</p>
-                  <p className="text-white/30 text-xs mt-2">Supports JPG, PNG, WEBP</p>
+                  <p className="text-white/60 font-medium mb-4">Drop image here or</p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={triggerUpload}
+                      className="px-4 py-2 bg-white text-black rounded-lg text-xs font-medium hover:bg-white/90 transition-colors"
+                    >
+                      Upload File
+                    </button>
+                    <button
+                      onClick={() => setIsPickerOpen(true)}
+                      className="px-4 py-2 bg-white/10 text-white rounded-lg text-xs font-medium hover:bg-white/20 transition-colors"
+                    >
+                      Select File
+                    </button>
+                  </div>
+                  <p className="text-white/30 text-[10px] mt-4">Supports JPG, PNG, WEBP</p>
                 </div>
               )}
             </div>
@@ -540,7 +533,7 @@ The result must be professional, high-quality, and indistinguishable from a real
           <h2 className="text-sm font-semibold uppercase tracking-widest text-white/40 mb-4">Result</h2>
           <div className="flex-1 bg-[#151515] rounded-[2.5rem] border border-white/5 overflow-hidden relative flex items-center justify-center min-h-[500px] p-8">
             <AnimatePresence mode="wait">
-              {isGenerating ? (
+              {(isGenerating || isEditing) ? (
                 <motion.div 
                   key="loading"
                   initial={{ opacity: 0 }}
@@ -553,7 +546,7 @@ The result must be professional, high-quality, and indistinguishable from a real
                     <div className="absolute inset-0 border-t-4 border-white rounded-full animate-spin" />
                   </div>
                   <div className="space-y-2">
-                    <p className="text-xl font-medium text-white">{loadingMessage}</p>
+                    <p className="text-xl font-medium text-white">{retryMessage || loadingMessage}</p>
                     <p className="text-white/40 text-sm">Gemini 3.1 Flash is processing your request</p>
                   </div>
                   <button 
@@ -575,42 +568,17 @@ The result must be professional, high-quality, and indistinguishable from a real
                 >
                   <div className="flex flex-col items-center justify-center gap-4 flex-1 max-w-full">
                     <div 
-                      className={`relative group ${showEditPanel ? 'cursor-crosshair' : 'cursor-zoom-in'} max-w-full select-none`}
-                      onMouseDown={handleMouseDown}
-                      onMouseMove={handleMouseMove}
-                      onMouseUp={handleMouseUp}
+                      className="relative group max-w-full select-none"
                     >
                       <img 
+                        key={generatedImage}
                         ref={imageRef}
                         src={generatedImage} 
                         alt="Generated" 
-                        className="max-w-full max-h-[65vh] rounded-2xl border border-white/10 shadow-2xl object-contain pointer-events-none"
+                        className="max-w-full max-h-[65vh] rounded-2xl border border-white/10 shadow-2xl object-contain cursor-zoom-in"
                         referrerPolicy="no-referrer"
+                        onClick={() => setPopupImage(generatedImage)}
                       />
-                      
-                      {/* Selection Overlay */}
-                      {selection && (
-                        <div 
-                          className="absolute border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.5),inset_0_0_0_1px_rgba(0,0,0,0.5)] bg-white/10 pointer-events-none"
-                          style={{
-                            left: `${Math.min(selection.x1, selection.x2) / 10}%`,
-                            top: `${Math.min(selection.y1, selection.y2) / 10}%`,
-                            width: `${Math.abs(selection.x2 - selection.x1) / 10}%`,
-                            height: `${Math.abs(selection.y2 - selection.y1) / 10}%`,
-                          }}
-                        >
-                          <div className="absolute -top-6 left-0 bg-white text-black text-[10px] font-bold px-1.5 py-0.5 rounded">
-                            SELECTED AREA
-                          </div>
-                        </div>
-                      )}
-
-                      {!showEditPanel && (
-                        <div 
-                          className="absolute inset-0 cursor-zoom-in" 
-                          onClick={() => setPopupImage(generatedImage)} 
-                        />
-                      )}
 
                       <a 
                         href={generatedImage} 
@@ -634,10 +602,7 @@ The result must be professional, high-quality, and indistinguishable from a real
                           이미지 다운로드
                         </a>
                         <button 
-                          onClick={() => {
-                            setShowEditPanel(!showEditPanel);
-                            if (!showEditPanel) setSelection(null);
-                          }}
+                          onClick={() => setShowEditPanel(!showEditPanel)}
                           className={`px-6 py-2.5 border rounded-xl font-semibold transition-all flex items-center gap-2 shadow-lg ${showEditPanel ? 'bg-white text-black border-white' : 'bg-white/10 hover:bg-white/20 border-white/10'}`}
                         >
                           <RefreshCw className={`w-4 h-4 ${showEditPanel ? 'rotate-180' : ''} transition-transform`} />
@@ -658,10 +623,10 @@ The result must be professional, high-quality, and indistinguishable from a real
                     >
                       <div className="flex justify-between items-center">
                         <div className="space-y-1">
-                          <h3 className="text-sm font-bold uppercase tracking-widest text-white/40">영역 기반 수정 (Area Edit)</h3>
-                          <p className="text-[10px] text-white/20">이미지 위를 드래그하여 영역을 선택하세요</p>
+                          <h3 className="text-sm font-bold uppercase tracking-widest text-white/40">이미지 수정 (Image Edit)</h3>
+                          <p className="text-[10px] text-white/20">수정할 내용을 아래에 입력하세요</p>
                         </div>
-                        <button onClick={() => { setShowEditPanel(false); setSelection(null); }} className="text-white/20 hover:text-white transition-colors">
+                        <button onClick={() => setShowEditPanel(false)} className="text-white/20 hover:text-white transition-colors">
                           <Maximize2 className="w-4 h-4 rotate-45" />
                         </button>
                       </div>
@@ -670,47 +635,23 @@ The result must be professional, high-quality, and indistinguishable from a real
                         <textarea
                           value={editPrompt}
                           onChange={(e) => setEditPrompt(e.target.value)}
-                          placeholder="선택한 영역을 어떻게 수정할까요? (예: 이 물체를 빨간색으로 바꿔줘)"
+                          placeholder="이미지를 어떻게 수정할까요? (예: 배경을 바다로 바꿔줘)"
                           className="flex-1 min-h-[120px] bg-black/40 border border-white/10 rounded-xl p-4 text-sm focus:border-white/30 outline-none transition-all resize-none"
                         />
                         
-                        <div className="grid grid-cols-2 gap-3">
-                          <button
-                            onClick={() => handleEditSubmit('modify')}
-                            disabled={isEditing || !editPrompt.trim()}
-                            className={`
-                              py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2
-                              ${isEditing || !editPrompt.trim() 
-                                ? 'bg-white/5 text-white/20 cursor-not-allowed' 
-                                : 'bg-white text-black hover:bg-white/90 shadow-lg'}
-                            `}
-                          >
-                            {isEditing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                            수정 적용
-                          </button>
-                          <button
-                            onClick={() => handleEditSubmit('delete')}
-                            disabled={isEditing || !selection}
-                            className={`
-                              py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2
-                              ${isEditing || !selection
-                                ? 'bg-red-500/5 text-red-500/20 cursor-not-allowed border border-red-500/10' 
-                                : 'bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/20'}
-                            `}
-                          >
-                            {isEditing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <AlertCircle className="w-4 h-4" />}
-                            영역 삭제
-                          </button>
-                        </div>
-                        
-                        {selection && (
-                          <button 
-                            onClick={() => setSelection(null)}
-                            className="text-[10px] text-white/30 hover:text-white transition-colors underline underline-offset-4"
-                          >
-                            선택 영역 해제
-                          </button>
-                        )}
+                        <button
+                          onClick={() => handleEditSubmit('modify')}
+                          disabled={isEditing || !editPrompt.trim()}
+                          className={`
+                            w-full py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2
+                            ${isEditing || !editPrompt.trim() 
+                              ? 'bg-white/5 text-white/20 cursor-not-allowed' 
+                              : 'bg-white text-black hover:bg-white/90 shadow-lg'}
+                          `}
+                        >
+                          {isEditing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                          수정 적용
+                        </button>
                       </div>
                     </motion.div>
                   )}
@@ -779,6 +720,11 @@ The result must be professional, high-quality, and indistinguishable from a real
           </motion.div>
         )}
       </AnimatePresence>
+      <ImagePickerPopup
+        isOpen={isPickerOpen}
+        onClose={() => setIsPickerOpen(false)}
+        onSelect={handleSelectFromGallery}
+      />
 
       {/* Footer */}
       <footer className="max-w-7xl mx-auto p-8 border-t border-white/10 mt-12 flex flex-col md:flex-row justify-between items-center gap-4 text-white/30 text-xs">

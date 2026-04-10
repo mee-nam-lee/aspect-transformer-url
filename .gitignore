@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+deploy.sh
+__pycache__/
+venv/
+backend/venv/
+*.sh
+.dockerignore
+.gitignore
